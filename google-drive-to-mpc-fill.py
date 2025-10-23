@@ -667,7 +667,7 @@ class GoogleDriveLister:
         except (ValueError, TypeError):
             return "Unknown"
     
-    def generate_mpcfill_xml(self, files: List[Dict], output_file: str, quantity: int = None, bracket: int = None, stock: str = "(S30) Standard Smooth", foil: bool = False, double_sided_pairs: List[tuple] = None) -> None:
+    def generate_mpcfill_xml(self, files: List[Dict], output_file: str, quantity: int = None, bracket: int = None, stock: str = "(S30) Standard Smooth", foil: bool = False, double_sided_pairs: List[tuple] = None, cardback: str = "12RJeMQw2E0jEz4SwKJTItoONCeHD7skj") -> None:
         """Generate MPCFill XML from the file data in memory"""
         
         # Filter out folders and only keep files
@@ -756,8 +756,8 @@ class GoogleDriveLister:
                 query_name = file_item.get('name', 'Unknown').replace('.png', '').replace('.jpg', '').replace('.jpeg', '').lower()
                 SubElement(card, 'query').text = query_name
         
-        # Add cardback (using a placeholder ID, can be customized)
-        SubElement(order, 'cardback').text = "12RJeMQw2E0jEz4SwKJTItoONCeHD7skj"
+        # Add cardback (using provided ID or default)
+        SubElement(order, 'cardback').text = cardback
         
         # Convert to pretty-printed XML
         rough_string = tostring(order, 'utf-8')
@@ -783,7 +783,7 @@ class GoogleDriveLister:
         print(f"Bracket: {bracket} cards")
         print(f"XML format matches MPCFill requirements")
     
-    def process_drive_link(self, url: str, verbose: bool = False, recursive: bool = False, max_depth: int = 5, exclude_folders: List[str] = None, xml_output: str = None, xml_stock: str = "(S30) Standard Smooth", xml_foil: bool = False, double_sided_pairs: List[tuple] = None):
+    def process_drive_link(self, url: str, verbose: bool = False, recursive: bool = False, max_depth: int = 5, exclude_folders: List[str] = None, xml_output: str = None, xml_stock: str = "(S30) Standard Smooth", xml_foil: bool = False, double_sided_pairs: List[tuple] = None, xml_cardback: str = "12RJeMQw2E0jEz4SwKJTItoONCeHD7skj"):
         """Main method to process a Google Drive link"""
         print(f"Processing Google Drive link: {url}")
         print("-" * 50)
@@ -857,7 +857,7 @@ class GoogleDriveLister:
             
             # Generate XML if requested
             if xml_output:
-                self.generate_mpcfill_xml(contents, xml_output, None, None, xml_stock, xml_foil, double_sided_pairs)
+                self.generate_mpcfill_xml(contents, xml_output, None, None, xml_stock, xml_foil, double_sided_pairs, xml_cardback)
         
         else:
             print("Detected: File")
@@ -950,6 +950,13 @@ you may need to use the authenticated version with Google Drive API.
         help='Pipe-separated pairs of front|back filenames for double-sided cards (e.g., "front1.png|back1.png|front2.png|back2.png")'
     )
     
+    parser.add_argument(
+        '--xml-cardback',
+        type=str,
+        default='12RJeMQw2E0jEz4SwKJTItoONCeHD7skj',
+        help='Cardback ID for XML generation (default: "12RJeMQw2E0jEz4SwKJTItoONCeHD7skj")'
+    )
+    
     args = parser.parse_args()
     
     # Parse exclude folders
@@ -996,7 +1003,8 @@ you may need to use the authenticated version with Google Drive API.
         xml_output,
         args.xml_stock,
         args.xml_foil,
-        double_sided_pairs
+        double_sided_pairs,
+        args.xml_cardback
     )
 
 if __name__ == "__main__":
