@@ -742,11 +742,11 @@ class GoogleDriveLister:
             SubElement(card, 'slots').text = str(i)
             SubElement(card, 'name').text = file_item.get('name', 'Unknown')
         
-        # Add backs section
-        backs = SubElement(order, 'backs')
-        
-        # Add each back card (only if we have double-sided pairs)
+        # Add backs section only if we have back cards
         if back_cards:
+            backs = SubElement(order, 'backs')
+            
+            # Add each back card
             for i, file_item in enumerate(back_cards):
                 card = SubElement(backs, 'card')
                 SubElement(card, 'id').text = file_item.get('id', '')
