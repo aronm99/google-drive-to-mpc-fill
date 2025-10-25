@@ -667,7 +667,7 @@ class GoogleDriveLister:
         except (ValueError, TypeError):
             return "Unknown"
     
-    def generate_mpcfill_xml(self, files: List[Dict], output_file: str, quantity: int = None, bracket: int = None, stock: str = "(S30) Standard Smooth", foil: bool = False, double_sided_pairs: List[tuple] = None, cardback: str = "12RJeMQw2E0jEz4SwKJTItoONCeHD7skj") -> None:
+    def generate_mpcfill_xml(self, files: List[Dict], output_file: str, quantity: int = None, bracket: int = None, stock: str = "(S30) Standard Smooth", foil: bool = False, double_sided_pairs: List[tuple] = None, cardback: str = "12RJeMQw2E0jEz4SwKJTItoONCeHD7skj", card_multiples: Dict[str, int] = None) -> None:
         """Generate MPCFill XML from the file data in memory"""
         
         # Filter out folders and only keep files
@@ -677,7 +677,7 @@ class GoogleDriveLister:
             print("No files found to generate XML")
             return
         
-        # Handle double-sided cards
+        # Handle double-sided cards and card multiples
         front_cards = []
         back_cards = []
         
@@ -693,11 +693,19 @@ class GoogleDriveLister:
                 back_item = file_map.get(back_name)
                 
                 if front_item and back_item:
-                    front_cards.append(front_item)
-                    back_cards.append(back_item)
+                    # Apply multiples to double-sided pairs
+                    front_multiple = card_multiples.get(front_name, 1) if card_multiples else 1
+                    back_multiple = card_multiples.get(back_name, 1) if card_multiples else 1
+                    
+                    # Add multiple copies of front and back cards
+                    for _ in range(front_multiple):
+                        front_cards.append(front_item)
+                    for _ in range(back_multiple):
+                        back_cards.append(back_item)
+                    
                     used_file_names.add(front_name)
                     used_file_names.add(back_name)
-                    print(f"Added double-sided pair: {front_name} -> {back_name}")
+                    print(f"Added double-sided pair: {front_name} (x{front_multiple}) -> {back_name} (x{back_multiple})")
                 else:
                     missing = []
                     if not front_item:
@@ -706,13 +714,24 @@ class GoogleDriveLister:
                         missing.append(back_name)
                     print(f"Warning: Could not find files for double-sided pair: {missing}")
             
-            # Add remaining files as single-sided front cards
+            # Add remaining files as single-sided front cards with multiples
             for item in file_items:
-                if item.get('name', '') not in used_file_names:
-                    front_cards.append(item)
+                item_name = item.get('name', '')
+                if item_name not in used_file_names:
+                    multiple = card_multiples.get(item_name, 1) if card_multiples else 1
+                    for _ in range(multiple):
+                        front_cards.append(item)
+                    if multiple > 1:
+                        print(f"Added {multiple} copies of: {item_name}")
         else:
-            # All files are front cards
-            front_cards = file_items
+            # All files are front cards with multiples
+            for item in file_items:
+                item_name = item.get('name', '')
+                multiple = card_multiples.get(item_name, 1) if card_multiples else 1
+                for _ in range(multiple):
+                    front_cards.append(item)
+                if multiple > 1:
+                    print(f"Added {multiple} copies of: {item_name}")
         
         # Auto-calculate quantity and bracket if not specified
         card_count = len(front_cards)
@@ -783,7 +802,7 @@ class GoogleDriveLister:
         print(f"Bracket: {bracket} cards")
         print(f"XML format matches MPCFill requirements")
     
-    def process_drive_link(self, url: str, verbose: bool = False, recursive: bool = False, max_depth: int = 5, exclude_folders: List[str] = None, xml_output: str = None, xml_stock: str = "(S30) Standard Smooth", xml_foil: bool = False, double_sided_pairs: List[tuple] = None, xml_cardback: str = "12RJeMQw2E0jEz4SwKJTItoONCeHD7skj"):
+    def process_drive_link(self, url: str, verbose: bool = False, recursive: bool = False, max_depth: int = 5, exclude_folders: List[str] = None, xml_output: str = None, xml_stock: str = "(S30) Standard Smooth", xml_foil: bool = False, double_sided_pairs: List[tuple] = None, xml_cardback: str = "12RJeMQw2E0jEz4SwKJTItoONCeHD7skj", card_multiples: Dict[str, int] = None):
         """Main method to process a Google Drive link"""
         print(f"Processing Google Drive link: {url}")
         print("-" * 50)
@@ -857,7 +876,7 @@ class GoogleDriveLister:
             
             # Generate XML if requested
             if xml_output:
-                self.generate_mpcfill_xml(contents, xml_output, None, None, xml_stock, xml_foil, double_sided_pairs, xml_cardback)
+                self.generate_mpcfill_xml(contents, xml_output, None, None, xml_stock, xml_foil, double_sided_pairs, xml_cardback, card_multiples)
         
         else:
             print("Detected: File")
@@ -883,9 +902,12 @@ Examples:
   python google_drive_lister.py --recursive --max-depth 3 "https://drive.google.com/drive/folders/1ABC123..."
   python google_drive_lister.py --verbose --recursive "https://drive.google.com/drive/folders/1ABC123..."
   python google_drive_lister.py --recursive --exclude "temp,backup,old" "https://drive.google.com/drive/folders/1ABC123..."
-  python google_drive_lister.py --xml-output cards.xml "https://drive.google.com/drive/folders/1ABC123..."
-  python google_drive_lister.py --recursive --xml-output cards.xml "https://drive.google.com/drive/folders/1ABC123..."
-  python google_drive_lister.py --xml-output cards.xml --double-sided "front1.png|back1.png|front2.png|back2.png" "https://drive.google.com/drive/folders/1ABC123..."
+  python google_drive_lister.py --output cards.xml "https://drive.google.com/drive/folders/1ABC123..."
+  python google_drive_lister.py --recursive --output cards.xml "https://drive.google.com/drive/folders/1ABC123..."
+  python google_drive_lister.py --output cards.xml --double-sided "front1.png|back1.png;front2.png|back2.png" "https://drive.google.com/drive/folders/1ABC123..."
+  python google_drive_lister.py --output cards.xml --card-multiples "card1.png|3;card2.png|2;card3.png|4" "https://drive.google.com/drive/folders/1ABC123..."
+  python google_drive_lister.py --output cards.xml --card-multiples "card1.png|3;frontCard.png|backCard.png;card2.png|2" "https://drive.google.com/drive/folders/1ABC123..."
+  python google_drive_lister.py --output cards.xml --double-sided "front1.png|back1.png" --card-multiples "front1.png|2;back1.png|2" "https://drive.google.com/drive/folders/1ABC123..."
   python google_drive_lister.py "https://drive.google.com/file/d/1XYZ789..."
   python google_drive_lister.py "https://drive.google.com/open?id=1DEF456..."
   
@@ -926,35 +948,41 @@ you may need to use the authenticated version with Google Drive API.
     )
     
     parser.add_argument(
-        '--xml-output',
+        '--output',
         type=str,
         help='Generate MPCFill XML file with the specified filename (defaults to outputs/ directory)'
     )
     
     parser.add_argument(
-        '--xml-stock',
+        '--stock',
         type=str,
         default='(S30) Standard Smooth',
-        help='Card stock type for XML generation (default: "(S30) Standard Smooth")'
+        help='Card stock type for MPCFill XML file (default: "(S30) Standard Smooth")'
     )
     
     parser.add_argument(
-        '--xml-foil',
+        '--foil',
         action='store_true',
-        help='Enable foil cards in XML generation (default: false)'
+        help='Enable foil cards in MPCFill XML file (default: false)'
     )
     
     parser.add_argument(
         '--double-sided',
         type=str,
-        help='Pipe-separated pairs of front|back filenames for double-sided cards (e.g., "front1.png|back1.png|front2.png|back2.png")'
+        help='Semicolon-separated pairs of front|back filenames for double-sided cards (e.g., "front1.png|back1.png;front2.png|back2.png")'
     )
     
     parser.add_argument(
-        '--xml-cardback',
+        '--cardback',
         type=str,
         default='12RJeMQw2E0jEz4SwKJTItoONCeHD7skj',
-        help='Cardback ID for XML generation (default: "12RJeMQw2E0jEz4SwKJTItoONCeHD7skj")'
+        help='The Google Drive ID of the cardback image for MPCFill XML file (default: "12RJeMQw2E0jEz4SwKJTItoONCeHD7skj")'
+    )
+    
+    parser.add_argument(
+        '--card-multiples',
+        type=str,
+        help='Semicolon-separated list of filename|count or frontCard|backCard pairs for multiple copies (e.g., "card1.png|3;frontCard.png|backCard.png;card2.png|2")'
     )
     
     args = parser.parse_args()
@@ -967,19 +995,58 @@ you may need to use the authenticated version with Google Drive API.
     # Parse double-sided pairs
     double_sided_pairs = []
     if args.double_sided:
-        # Split by pipe to get pairs
-        parts = [part.strip() for part in args.double_sided.split('|') if part.strip()]
+        # Split by semicolon to get pairs
+        pairs = [pair.strip() for pair in args.double_sided.split(';') if pair.strip()]
         
-        if len(parts) % 2 != 0:
-            print("Error: Double-sided argument must have an even number of filenames (pairs)")
-            print(f"Found {len(parts)} parts: {parts}")
-            return
-        
-        for i in range(0, len(parts), 2):
-            front_name = parts[i]
-            back_name = parts[i + 1]
+        for pair in pairs:
+            if '|' not in pair:
+                print(f"Error: Invalid double-sided format: {pair}. Expected 'front|back'")
+                return
+            
+            front_name, back_name = pair.split('|', 1)
+            front_name = front_name.strip()
+            back_name = back_name.strip()
+            
+            if not front_name or not back_name:
+                print(f"Error: Empty front or back name in pair: {pair}")
+                return
+            
             double_sided_pairs.append((front_name, back_name))
             print(f"Added double-sided pair: {front_name} -> {back_name}")
+    
+    # Parse card multiples
+    card_multiples = {}
+    if args.card_multiples:
+        # Split by semicolon to get pairs
+        pairs = [pair.strip() for pair in args.card_multiples.split(';') if pair.strip()]
+        
+        for pair in pairs:
+            if '|' not in pair:
+                print(f"Error: Invalid card multiples format: {pair}. Expected 'filename|count' or 'frontCard|backCard'")
+                return
+            
+            parts = pair.split('|')
+            if len(parts) == 2:
+                # Check if second part is a number (filename|count) or another filename (frontCard|backCard)
+                second_part = parts[1].strip()
+                try:
+                    # Try to parse as number
+                    count = int(second_part)
+                    if count < 1:
+                        print(f"Error: Count must be at least 1 for {parts[0]}")
+                        return
+                    card_multiples[parts[0].strip()] = count
+                    print(f"Added {count} copies of: {parts[0].strip()}")
+                except ValueError:
+                    # Not a number, treat as front|back pair
+                    front_card = parts[0].strip()
+                    back_card = second_part
+                    card_multiples[front_card] = 1
+                    card_multiples[back_card] = 1
+                    print(f"Added front|back pair: {front_card} | {back_card}")
+            else:
+                print(f"Error: Invalid card multiples format: {pair}. Expected 'filename|count' or 'frontCard|backCard'")
+                return
     
     # Validate URL
     if not args.url.startswith(('http://', 'https://')):
@@ -990,7 +1057,7 @@ you may need to use the authenticated version with Google Drive API.
     lister = GoogleDriveLister()
     
     # Modify xml_output to use outputs directory by default
-    xml_output = args.xml_output
+    xml_output = args.output
     if xml_output and not os.path.dirname(xml_output):
         xml_output = os.path.join('outputs', xml_output)
     
@@ -1001,10 +1068,11 @@ you may need to use the authenticated version with Google Drive API.
         args.max_depth, 
         exclude_folders,
         xml_output,
-        args.xml_stock,
-        args.xml_foil,
+        args.stock,
+        args.foil,
         double_sided_pairs,
-        args.xml_cardback
+        args.cardback,
+        card_multiples
     )
 
 if __name__ == "__main__":
