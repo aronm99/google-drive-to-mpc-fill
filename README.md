@@ -79,6 +79,49 @@ python google-drive-to-mpc-fill.py --card-multiples "card1.png|3;card2.png|2;fro
 python google-drive-to-mpc-fill.py --recursive --double-sided "front1.png|back1.png" --card-multiples "front1.png|2;back1.png|2" --output combined.xml "https://drive.google.com/drive/folders/1ABC123..."
 ```
 
+## Combining Multiple XML Files
+
+Use `combine-mpc-fill-files.py` to merge multiple MPC fill XML files into a single file:
+
+```bash
+# Combine two XML files (looks in outputs/ directory by default)
+python combine-mpc-fill-files.py file1.xml file2.xml -o combined.xml
+
+# Combine all XML files in outputs directory
+python combine-mpc-fill-files.py outputs/*.xml -o combined.xml
+
+# Or specify full paths
+python combine-mpc-fill-files.py outputs/file1.xml outputs/file2.xml -o combined.xml
+
+# Override stock type
+python combine-mpc-fill-files.py file1.xml file2.xml -o combined.xml --stock "(S33) Superior Smooth"
+
+# Enable foil
+python combine-mpc-fill-files.py file1.xml file2.xml -o combined.xml --foil
+
+# Override cardback ID
+python combine-mpc-fill-files.py file1.xml file2.xml -o combined.xml --cardback "YOUR_CARDBACK_ID"
+
+# Disable automatic bracket calculation
+python combine-mpc-fill-files.py file1.xml file2.xml -o combined.xml --no-auto-bracket
+```
+
+### Combine Script Options
+
+- `input_files`: Input XML files to combine (defaults to `outputs/` directory if no directory specified)
+- `-o, --output`: Output XML file path (required, defaults to `outputs/` directory if no directory specified)
+- `--stock`: Override stock type (e.g., "(S30) Standard Smooth", "(S33) Superior Smooth")
+- `--foil`: Enable foil cards (overrides input files)
+- `--no-foil`: Disable foil cards (overrides input files)
+- `--cardback`: Override cardback Google Drive ID
+- `--no-auto-bracket`: Disable automatic bracket calculation (uses maximum bracket from input files)
+
+The script automatically:
+- Combines all front cards and back cards from input files
+- Renumbers slot numbers sequentially
+- Calculates total quantity and appropriate bracket size
+- Merges stock, foil, and cardback settings (uses first file's settings by default)
+
 ## Output
 
 XML files are generated in the `outputs/` directory and are compatible with [MPC Autofill](https://github.com/chilli-axe/mpc-autofill/releases).

@@ -667,11 +667,22 @@ class GoogleDriveLister:
         except (ValueError, TypeError):
             return "Unknown"
     
-    def generate_mpcfill_xml(self, files: List[Dict], output_file: str, quantity: int = None, bracket: int = None, stock: str = "(S30) Standard Smooth", foil: bool = False, double_sided_pairs: List[tuple] = None, cardback: str = "12RJeMQw2E0jEz4SwKJTItoONCeHD7skj", card_multiples: Dict[str, int] = None) -> None:
+    def generate_mpcfill_xml(self, files: List[Dict], output_file: str, quantity: int = None, bracket: int = None, stock: str = "(S30) Standard Smooth", foil: bool = False, double_sided_pairs: List[tuple] = None, cardback: str = "12RJeMQw2E0jEz4SwKJTItoONCeHD7skj", card_multiples: Dict[str, int] = None, exclude_names: List[str] = None) -> None:
         """Generate MPCFill XML from the file data in memory"""
+        
+        if exclude_names is None:
+            exclude_names = []
         
         # Filter out folders and only keep files
         file_items = [item for item in files if not item.get('isFolder', False)]
+        
+        # Filter out excluded files based on filename
+        if exclude_names:
+            original_count = len(file_items)
+            file_items = [item for item in file_items if item.get('name', '').lower() not in [ex.lower() for ex in exclude_names]]
+            excluded_count = original_count - len(file_items)
+            if excluded_count > 0:
+                print(f"Excluded {excluded_count} file(s) based on filename")
         
         if not file_items:
             print("No files found to generate XML")
@@ -853,6 +864,14 @@ class GoogleDriveLister:
                     else:
                         print(f"  [FOLDER] {folder_name}")
             
+            # Filter out excluded files based on filename
+            if exclude_folders:
+                original_file_count = len(files)
+                files = [item for item in files if item.get('name', '').lower() not in [ex.lower() for ex in exclude_folders]]
+                excluded_file_count = original_file_count - len(files)
+                if excluded_file_count > 0:
+                    print(f"\nExcluded {excluded_file_count} file(s) based on filename")
+            
             # Display files
             if files:
                 print(f"\nFiles ({len(files)}):")
@@ -876,7 +895,7 @@ class GoogleDriveLister:
             
             # Generate XML if requested
             if xml_output:
-                self.generate_mpcfill_xml(contents, xml_output, None, None, xml_stock, xml_foil, double_sided_pairs, xml_cardback, card_multiples)
+                self.generate_mpcfill_xml(contents, xml_output, None, None, xml_stock, xml_foil, double_sided_pairs, xml_cardback, card_multiples, exclude_folders)
         
         else:
             print("Detected: File")
@@ -901,7 +920,7 @@ Examples:
   python google_drive_lister.py --recursive "https://drive.google.com/drive/folders/1ABC123..."
   python google_drive_lister.py --recursive --max-depth 3 "https://drive.google.com/drive/folders/1ABC123..."
   python google_drive_lister.py --verbose --recursive "https://drive.google.com/drive/folders/1ABC123..."
-  python google_drive_lister.py --recursive --exclude "temp,backup,old" "https://drive.google.com/drive/folders/1ABC123..."
+  python google_drive_lister.py --recursive --exclude "temp,backup,old,unwanted.png" "https://drive.google.com/drive/folders/1ABC123..."
   python google_drive_lister.py --output cards.xml "https://drive.google.com/drive/folders/1ABC123..."
   python google_drive_lister.py --recursive --output cards.xml "https://drive.google.com/drive/folders/1ABC123..."
   python google_drive_lister.py --output cards.xml --double-sided "front1.png|back1.png;front2.png|back2.png" "https://drive.google.com/drive/folders/1ABC123..."
@@ -944,7 +963,7 @@ you may need to use the authenticated version with Google Drive API.
         '--exclude',
         type=str,
         default='',
-        help='Comma-separated list of folder names to exclude from recursive processing (case-insensitive)'
+        help='Comma-separated list of folder and file names to exclude from processing (case-insensitive)'
     )
     
     parser.add_argument(
