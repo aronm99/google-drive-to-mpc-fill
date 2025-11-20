@@ -15,6 +15,9 @@ Requirements:
 - requests
 - beautifulsoup4
 - lxml (optional, for better HTML parsing)
+- selenium (optional, for handling lazy-loaded content)
+
+Note: Selenium is used by default to scroll and load all lazy-loaded content. Use --use-raw-html for faster raw HTML scraping (may miss lazy-loaded files).
 """
 
 import re
@@ -23,6 +26,7 @@ import argparse
 import json
 import csv
 import os
+import time
 from typing import List, Dict, Optional
 from urllib.parse import urlparse, parse_qs
 from xml.etree.ElementTree import Element, SubElement, tostring
@@ -38,13 +42,27 @@ except ImportError as e:
     print(f"pip install requests beautifulsoup4 lxml")
     sys.exit(1)
 
+# Selenium is optional - only needed for lazy-loaded content
+SELENIUM_AVAILABLE = False
+try:
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException, WebDriverException
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    pass
+
 class GoogleDriveLister:
-    def __init__(self):
+    def __init__(self, use_selenium: bool = True):
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
         self.bracket_sizes = DEFAULT_BRACKET_SIZE
+        self.use_selenium = use_selenium and SELENIUM_AVAILABLE
+        self.driver = None
     
     def _find_next_bracket(self, quantity: int) -> int:
         """Find the next largest bracket size for the given quantity"""
@@ -146,6 +164,495 @@ class GoogleDriveLister:
             print(f"      - Detected as folder: {self._is_folder(item)}")
             print()
     
+    def _get_page_with_selenium(self, url: str, verbose: bool = False) -> Optional[bytes]:
+        """Use Selenium to load page and scroll to load all lazy-loaded content"""
+        if not SELENIUM_AVAILABLE:
+            if verbose:
+                print("  Selenium not available. Install with: pip install selenium")
+            return None
+        
+        try:
+            # Initialize driver if not already done
+            if self.driver is None:
+                try:
+                    # Try Chrome first
+                    options = webdriver.ChromeOptions()
+                    options.add_argument('--headless')
+                    options.add_argument('--no-sandbox')
+                    options.add_argument('--disable-dev-shm-usage')
+                    options.add_argument('--disable-gpu')
+                    options.add_argument('--window-size=1920,1080')
+                    options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
+                    self.driver = webdriver.Chrome(options=options)
+                except Exception as e:
+                    if verbose:
+                        print(f"  Could not initialize Chrome driver: {e}")
+                        print("  Trying Firefox...")
+                    try:
+                        options = webdriver.FirefoxOptions()
+                        options.add_argument('--headless')
+                        self.driver = webdriver.Firefox(options=options)
+                    except Exception as e2:
+                        if verbose:
+                            print(f"  Could not initialize Firefox driver: {e2}")
+                        return None
+            
+            if verbose:
+                print("  Loading page with Selenium...")
+            
+            # Load the page
+            self.driver.get(url)
+            
+            # Wait for initial content to load
+            time.sleep(3)
+            
+            if verbose:
+                print("  Scrolling to load all content...")
+            
+            # Try multiple strategies to find scroll containers
+            scroll_containers = []
+            scroll_selectors = [
+                'c-wiz',  # Google's custom element for dynamic content containers
+                'c-wiz[jsname]',  # c-wiz with jsname attribute
+                '[role="main"]',
+                '[data-view-type="1"]',
+                'div[role="grid"]',
+                'div[role="listbox"]',
+                'div[data-view-type]',
+                'div[style*="overflow"]',
+                'div[style*="overflow-y"]',
+                'table tbody',
+                '.a-s-fa-Ha-pa',
+                'div[jsname]'
+            ]
+            
+            if verbose:
+                print("  Searching for scrollable containers...")
+            
+            for selector in scroll_selectors:
+                try:
+                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    if verbose and elements:
+                        print(f"    Found {len(elements)} element(s) with selector: {selector}")
+                    
+                    for element in elements:
+                        try:
+                            # Check if element is scrollable
+                            scroll_height = self.driver.execute_script("return arguments[0].scrollHeight;", element)
+                            client_height = self.driver.execute_script("return arguments[0].clientHeight;", element)
+                            is_scrollable = scroll_height > client_height
+                            
+                            if verbose:
+                                tag_name = self.driver.execute_script("return arguments[0].tagName;", element)
+                                element_id = element.get_attribute('id') or 'no-id'
+                                element_class = element.get_attribute('class') or 'no-class'
+                                print(f"      Element: <{tag_name}> id='{element_id}' class='{element_class[:50]}...'")
+                                print(f"        scrollHeight: {scroll_height}, clientHeight: {client_height}, scrollable: {is_scrollable}")
+                            
+                            if is_scrollable:
+                                scroll_containers.append(element)
+                                if verbose:
+                                    print(f"        -> Added to scroll containers list")
+                        except Exception as e:
+                            if verbose:
+                                print(f"        -> Error checking element: {e}")
+                            continue
+                except Exception as e:
+                    if verbose:
+                        print(f"    Error with selector '{selector}': {e}")
+                    continue
+            
+            if verbose:
+                print(f"  Found {len(scroll_containers)} scrollable container(s)")
+                print(f"  Adding window/document as fallback scroll target")
+            
+            # Also try window/document scrolling
+            scroll_containers.append(None)  # None means scroll window
+            if verbose:
+                print(f"  Total scroll targets: {len(scroll_containers)} (including window)")
+            
+            # Count file elements using multiple selectors
+            def count_files():
+                """Count files using multiple selector strategies"""
+                counts = []
+                selectors = [
+                    '[data-id]',
+                    '[data-target="file"]',
+                    '[data-target="folder"]',
+                    'div[data-id]',
+                    'tr[data-id]',
+                    '[role="row"]',
+                    'div[jsname][data-id]'
+                ]
+                for selector in selectors:
+                    try:
+                        elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                        counts.append(len(elements))
+                    except:
+                        continue
+                return max(counts) if counts else 0
+            
+            # Count initial files
+            last_count = count_files()
+            if verbose:
+                print(f"  Initial file count: {last_count}")
+            
+            # Scroll strategy: incremental scrolling works better than jumping to bottom
+            scroll_attempts = 0
+            max_scroll_attempts = 100  # Increased for large folders
+            no_change_count = 0
+            max_no_change = 5  # Increased threshold
+            
+            while scroll_attempts < max_scroll_attempts:
+                if verbose:
+                    print(f"  Scroll attempt {scroll_attempts + 1}/{max_scroll_attempts}")
+                
+                # Try scrolling each container
+                scrolled = False
+                for idx, container in enumerate(scroll_containers):
+                    try:
+                        if container is None:
+                            # Scroll window incrementally
+                            current_scroll = self.driver.execute_script("return window.pageYOffset || document.documentElement.scrollTop;")
+                            max_scroll = self.driver.execute_script("return Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);")
+                            # Scroll down by viewport height
+                            scroll_amount = self.driver.execute_script("return window.innerHeight;")
+                            new_scroll = min(current_scroll + scroll_amount, max_scroll)
+                            
+                            if verbose:
+                                print(f"    Scrolling window: {current_scroll} -> {new_scroll} (max: {max_scroll})")
+                            
+                            self.driver.execute_script(f"window.scrollTo(0, {new_scroll});")
+                            scrolled = True
+                        else:
+                            # Scroll container incrementally
+                            current_scroll = self.driver.execute_script("return arguments[0].scrollTop;", container)
+                            max_scroll = self.driver.execute_script("return arguments[0].scrollHeight;", container)
+                            client_height = self.driver.execute_script("return arguments[0].clientHeight;", container)
+                            # Scroll down by container height
+                            new_scroll = min(current_scroll + client_height, max_scroll)
+                            
+                            if verbose:
+                                tag_name = self.driver.execute_script("return arguments[0].tagName;", container)
+                                print(f"    Scrolling container #{idx} (<{tag_name}>): {current_scroll} -> {new_scroll} (max: {max_scroll}, client: {client_height})")
+                            
+                            self.driver.execute_script("arguments[0].scrollTop = arguments[1];", container, new_scroll)
+                            scrolled = True
+                    except Exception as e:
+                        if verbose:
+                            print(f"    Error scrolling container #{idx}: {e}")
+                        continue
+                
+                if not scrolled:
+                    # Fallback: scroll window
+                    if verbose:
+                        print(f"    No container scrolled, using fallback window scroll")
+                    self.driver.execute_script("window.scrollBy(0, window.innerHeight);")
+                
+                # Wait for content to load (longer wait for Google Drive)
+                time.sleep(2)
+                
+                # Count files again
+                current_count = count_files()
+                
+                if verbose:
+                    if current_count != last_count:
+                        print(f"  File count changed: {last_count} -> {current_count} (+{current_count - last_count})")
+                    else:
+                        print(f"  File count unchanged: {current_count} (no change count: {no_change_count})")
+                
+                if current_count == last_count:
+                    no_change_count += 1
+                    if no_change_count >= max_no_change:
+                        if verbose:
+                            print(f"  No new files loaded after {no_change_count} scroll attempts (found {current_count} files)")
+                        # Try one more aggressive scroll to bottom
+                        if scroll_attempts < max_scroll_attempts - 1:
+                            if verbose:
+                                print(f"  Attempting aggressive scroll to bottom...")
+                            for idx, container in enumerate(scroll_containers):
+                                try:
+                                    if container is None:
+                                        max_scroll = self.driver.execute_script("return Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);")
+                                        if verbose:
+                                            print(f"    Scrolling window to bottom: {max_scroll}")
+                                        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                                    else:
+                                        max_scroll = self.driver.execute_script("return arguments[0].scrollHeight;", container)
+                                        tag_name = self.driver.execute_script("return arguments[0].tagName;", container)
+                                        if verbose:
+                                            print(f"    Scrolling container #{idx} (<{tag_name}>) to bottom: {max_scroll}")
+                                        self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", container)
+                                except Exception as e:
+                                    if verbose:
+                                        print(f"    Error in aggressive scroll for container #{idx}: {e}")
+                                    continue
+                            time.sleep(3)
+                            current_count = count_files()
+                            if verbose:
+                                print(f"  File count after aggressive scroll: {current_count}")
+                            if current_count == last_count:
+                                if verbose:
+                                    print(f"  No additional files found, stopping scroll attempts")
+                                break
+                            else:
+                                no_change_count = 0
+                                if verbose:
+                                    print(f"  Found more files after aggressive scroll: {current_count} (+{current_count - last_count})")
+                        else:
+                            break
+                else:
+                    no_change_count = 0
+                    last_count = current_count
+                
+                scroll_attempts += 1
+            
+            # Final scroll to bottom to catch any remaining files
+            if verbose:
+                print(f"  Performing final scroll to bottom...")
+            for idx, container in enumerate(scroll_containers):
+                try:
+                    if container is None:
+                        max_scroll = self.driver.execute_script("return Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);")
+                        if verbose:
+                            print(f"    Final window scroll to: {max_scroll}")
+                        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                    else:
+                        max_scroll = self.driver.execute_script("return arguments[0].scrollHeight;", container)
+                        tag_name = self.driver.execute_script("return arguments[0].tagName;", container)
+                        if verbose:
+                            print(f"    Final container #{idx} (<{tag_name}>) scroll to: {max_scroll}")
+                        self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", container)
+                except Exception as e:
+                    if verbose:
+                        print(f"    Error in final scroll for container #{idx}: {e}")
+                    continue
+            time.sleep(2)
+            
+            # Final count
+            final_count = count_files()
+            if verbose:
+                print(f"  Final file count: {final_count}")
+            
+            # Scroll back to top
+            if verbose:
+                print(f"  Scrolling back to top...")
+            for idx, container in enumerate(scroll_containers):
+                try:
+                    if container is None:
+                        self.driver.execute_script("window.scrollTo(0, 0);")
+                    else:
+                        self.driver.execute_script("arguments[0].scrollTop = 0;", container)
+                except Exception as e:
+                    if verbose:
+                        print(f"    Error scrolling container #{idx} to top: {e}")
+                    continue
+            time.sleep(1)
+            
+            if verbose:
+                print(f"  Finished scrolling after {scroll_attempts} attempts")
+                print(f"  Summary: Found {len(scroll_containers)} scroll target(s), {final_count} total files")
+            
+            # Try to extract files directly from DOM before getting HTML
+            # This can be more reliable than parsing HTML
+            direct_files = self._extract_files_from_selenium_dom(verbose)
+            if direct_files and verbose:
+                print(f"  Extracted {len(direct_files)} files directly from DOM")
+            
+            # Get the page source
+            html_content = self.driver.page_source.encode('utf-8')
+            
+            # Store direct files for later use if needed
+            if direct_files:
+                # We'll inject these into the HTML as a comment so they can be extracted
+                # This is a workaround to pass data from Selenium to BeautifulSoup
+                files_json = json.dumps(direct_files)
+                html_content = html_content + f'<!-- SELENIUM_DIRECT_FILES: {files_json} -->'.encode('utf-8')
+            
+            return html_content
+            
+        except Exception as e:
+            if verbose:
+                print(f"  Error using Selenium: {e}")
+            return None
+    
+    def _extract_files_from_selenium_dom(self, verbose: bool = False) -> List[Dict]:
+        """Extract file information directly from Selenium DOM elements using same logic as BeautifulSoup"""
+        files = []
+        if not self.driver:
+            return files
+        
+        try:
+            # Use the same selectors as BeautifulSoup extraction
+            selectors = [
+                '[data-id]',
+                '[data-target="file"]',
+                '[data-target="folder"]',
+                '[data-file-id]',
+                '[data-folder-id]',
+                'tr[data-id]',  # Table rows with data-id
+                'div[data-id]',  # Divs with data-id
+                '[role="row"][data-id]',  # Rows with role and data-id
+            ]
+            
+            seen_ids = set()  # Track seen IDs to avoid duplicates
+            
+            for selector in selectors:
+                try:
+                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    for element in elements:
+                        try:
+                            # Get file ID using same logic as BeautifulSoup
+                            file_id = (element.get_attribute('data-id') or 
+                                      element.get_attribute('data-file-id') or 
+                                      element.get_attribute('data-folder-id') or '')
+                            
+                            # Skip if no ID or already seen
+                            if not file_id or file_id in seen_ids:
+                                continue
+                            
+                            # Skip if ID is too short (likely not a valid Google Drive ID)
+                            if len(file_id) < 10:
+                                continue
+                            
+                            seen_ids.add(file_id)
+                            
+                            # Try to get the name from various sources (same as BeautifulSoup)
+                            name = None
+                            
+                            # Method 1: Check data-name attribute
+                            name = element.get_attribute('data-name')
+                            if name:
+                                name = name.strip()
+                            
+                            # Method 2: Check aria-label (often contains filename)
+                            if not name:
+                                aria_label = element.get_attribute('aria-label')
+                                if aria_label:
+                                    # Extract filename from aria-label (format: "Image filename.png Shared")
+                                    # Remove common prefixes/suffixes
+                                    name = aria_label.replace('Image', '').replace('Shared', '').strip()
+                                    # Remove leading/trailing quotes if present
+                                    name = name.strip('"').strip("'").strip()
+                            
+                            # Method 3: Look for text in child elements (table cells, divs)
+                            if not name:
+                                try:
+                                    # Try to find text in table cells
+                                    cells = element.find_elements(By.TAG_NAME, 'td')
+                                    if not cells:
+                                        cells = element.find_elements(By.TAG_NAME, 'div')
+                                    for cell in cells:
+                                        text = cell.text.strip()
+                                        if text and len(text) > 2 and not text.startswith('http'):
+                                            # Check if it looks like a filename
+                                            if '.' in text or len(text) < 100:
+                                                name = text
+                                                break
+                                except:
+                                    pass
+                            
+                            # Method 4: Get text directly from element
+                            if not name:
+                                name = element.text.strip()
+                                # Clean up - remove common prefixes
+                                if name.startswith('Image'):
+                                    name = name[5:].strip()
+                                if name.endswith('Shared'):
+                                    name = name[:-6].strip()
+                            
+                            # Skip if still no name or name looks invalid (same validation as BeautifulSoup)
+                            if not name or len(name) < 2 or name.startswith('window.') or 'AF_initDataCallback' in name:
+                                continue
+                            
+                            # Skip entries that look like JavaScript code or system data
+                            if (name.startswith('window.') or 
+                                name.startswith('AF_initDataCallback') or
+                                name.startswith('%.@.') or
+                                'null,null,null' in name or
+                                len(name) > 1000 or  # Skip very long names (likely JS data)
+                                name.count('"') > 10):  # Skip entries with too many quotes
+                                continue
+                            
+                            # Check if this element has image previews (indicating it's a file)
+                            has_image_preview = False
+                            # Look for img tags within this element or its parent
+                            try:
+                                img_tags = element.find_elements(By.TAG_NAME, 'img')
+                                if not img_tags:
+                                    # Try parent element
+                                    try:
+                                        parent = element.find_element(By.XPATH, '..')
+                                        img_tags = parent.find_elements(By.TAG_NAME, 'img')
+                                    except:
+                                        pass
+                                if img_tags:
+                                    has_image_preview = True
+                            except:
+                                pass
+                            
+                            # Get aria-label on this element or its parents
+                            aria_label = element.get_attribute('aria-label')
+                            if not aria_label:
+                                try:
+                                    parent = element.find_element(By.XPATH, '..')
+                                    aria_label = parent.get_attribute('aria-label') or ''
+                                except:
+                                    aria_label = ''
+                            
+                            # Get other attributes for folder detection
+                            data_target = element.get_attribute('data-target') or ''
+                            class_attr = element.get_attribute('class') or ''
+                            classes = class_attr.split() if class_attr else []
+                            
+                            # Build file item with same structure as BeautifulSoup
+                            file_item = {
+                                'name': name,
+                                'id': file_id,
+                                'mimeType': 'unknown',
+                                'size': element.get_attribute('data-size') or '',
+                                'isFolder': False,  # Will be set below using _is_folder
+                                'class': classes,
+                                'data-target': data_target,
+                                'aria-label': aria_label,
+                                'has_image_preview': has_image_preview
+                            }
+                            
+                            # Use the same _is_folder method as BeautifulSoup
+                            file_item['isFolder'] = self._is_folder(file_item)
+                            
+                            # Debug if verbose
+                            self._debug_item(file_item, verbose)
+                            
+                            files.append(file_item)
+                            
+                        except Exception as e:
+                            if verbose:
+                                print(f"    Error extracting from element: {e}")
+                            continue
+                except Exception as e:
+                    if verbose:
+                        print(f"    Error with selector {selector}: {e}")
+                    continue
+            
+            if verbose:
+                print(f"  Extracted {len(files)} files directly from Selenium DOM")
+            
+        except Exception as e:
+            if verbose:
+                print(f"  Error extracting files from DOM: {e}")
+        
+        return files
+    
+    def cleanup_selenium(self):
+        """Clean up Selenium driver if it was initialized"""
+        if self.driver:
+            try:
+                self.driver.quit()
+            except:
+                pass
+            self.driver = None
+    
     def get_folder_contents_via_scraping(self, folder_id: str, verbose: bool = False, recursive: bool = False, max_depth: int = 5, current_depth: int = 0, current_path: str = "", exclude_folders: List[str] = None) -> List[Dict]:
         """Get folder contents using web scraping with optional recursive traversal"""
         if exclude_folders is None:
@@ -159,10 +666,22 @@ class GoogleDriveLister:
         url = f"https://drive.google.com/drive/folders/{folder_id}"
         
         try:
-            response = self.session.get(url)
-            response.raise_for_status()
+            # Use Selenium if enabled (for scrolling to load lazy content)
+            html_content = None
+            if self.use_selenium:
+                if verbose:
+                    print(f"  Using Selenium to load folder contents...")
+                html_content = self._get_page_with_selenium(url, verbose)
             
-            soup = BeautifulSoup(response.content, 'html.parser')
+            # If Selenium didn't work or wasn't enabled, use regular requests
+            if html_content is None:
+                if verbose and self.use_selenium:
+                    print(f"  Selenium failed, falling back to regular requests...")
+                response = self.session.get(url)
+                response.raise_for_status()
+                html_content = response.content
+            
+            soup = BeautifulSoup(html_content, 'html.parser')
             files = []
             
             # Method 1: Look for file/folder data based on custom data attributes
@@ -927,11 +1446,16 @@ Examples:
   python google_drive_lister.py --output cards.xml --card-multiples "card1.png|3;card2.png|2;card3.png|4" "https://drive.google.com/drive/folders/1ABC123..."
   python google_drive_lister.py --output cards.xml --card-multiples "card1.png|3;frontCard.png|backCard.png;card2.png|2" "https://drive.google.com/drive/folders/1ABC123..."
   python google_drive_lister.py --output cards.xml --double-sided "front1.png|back1.png" --card-multiples "front1.png|2;back1.png|2" "https://drive.google.com/drive/folders/1ABC123..."
+  python google_drive_lister.py --use-raw-html "https://drive.google.com/drive/folders/1ABC123..."
   python google_drive_lister.py "https://drive.google.com/file/d/1XYZ789..."
   python google_drive_lister.py "https://drive.google.com/open?id=1DEF456..."
   
 Note: This script works with public Google Drive links. For private folders,
 you may need to use the authenticated version with Google Drive API.
+
+Selenium is used by default to scroll and load all lazy-loaded content. This requires
+installing selenium and a browser driver. Use --use-raw-html for faster raw HTML scraping
+(but may miss files that require scrolling to load).
         """
     )
     
@@ -1004,6 +1528,12 @@ you may need to use the authenticated version with Google Drive API.
         help='Semicolon-separated list of filename|count or frontCard|backCard pairs for multiple copies (e.g., "card1.png|3;frontCard.png|backCard.png;card2.png|2")'
     )
     
+    parser.add_argument(
+        '--use-raw-html',
+        action='store_true',
+        help='Use raw HTML scraping instead of Selenium (faster but may miss lazy-loaded content). Selenium is used by default to scroll and load all files.'
+    )
+    
     args = parser.parse_args()
     
     # Parse exclude folders
@@ -1072,27 +1602,42 @@ you may need to use the authenticated version with Google Drive API.
         print("Error: Please provide a valid URL")
         sys.exit(1)
     
+    # Determine if we should use Selenium (default) or raw HTML
+    use_selenium = not args.use_raw_html
+    
+    # Check if Selenium is needed but not available
+    if use_selenium and not SELENIUM_AVAILABLE:
+        print("Warning: Selenium is required (default) but is not installed.")
+        print("Install it with: pip install selenium")
+        print("You also need to install a browser driver (ChromeDriver or GeckoDriver)")
+        print("Falling back to raw HTML scraping...")
+        use_selenium = False
+    
     # Create lister instance and process the link
-    lister = GoogleDriveLister()
+    lister = GoogleDriveLister(use_selenium=use_selenium)
     
-    # Modify xml_output to use outputs directory by default
-    xml_output = args.output
-    if xml_output and not os.path.dirname(xml_output):
-        xml_output = os.path.join('outputs', xml_output)
-    
-    lister.process_drive_link(
-        args.url, 
-        args.verbose, 
-        args.recursive, 
-        args.max_depth, 
-        exclude_folders,
-        xml_output,
-        args.stock,
-        args.foil,
-        double_sided_pairs,
-        args.cardback,
-        card_multiples
-    )
+    try:
+        # Modify xml_output to use outputs directory by default
+        xml_output = args.output
+        if xml_output and not os.path.dirname(xml_output):
+            xml_output = os.path.join('outputs', xml_output)
+        
+        lister.process_drive_link(
+            args.url, 
+            args.verbose, 
+            args.recursive, 
+            args.max_depth, 
+            exclude_folders,
+            xml_output,
+            args.stock,
+            args.foil,
+            double_sided_pairs,
+            args.cardback,
+            card_multiples
+        )
+    finally:
+        # Clean up Selenium driver if it was used
+        lister.cleanup_selenium()
 
 if __name__ == "__main__":
     main()

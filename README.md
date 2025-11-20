@@ -8,6 +8,12 @@ Extract card images from Google Drive folders and generate MPCFill XML files for
 pip install -r requirements.txt
 ```
 
+**Note:** Selenium is used by default to scroll and load all lazy-loaded content. This requires:
+- `selenium` package (included in requirements.txt)
+- A browser driver (ChromeDriver or GeckoDriver)
+
+If Selenium is not available, the script will automatically fall back to raw HTML scraping.
+
 ## Usage
 
 ### Basic Usage
@@ -58,6 +64,9 @@ python google-drive-to-mpc-fill.py --output my-cards.xml "https://drive.google.c
 
 # Verbose output
 --verbose
+
+# Use raw HTML scraping instead of Selenium (faster but may miss lazy-loaded files)
+--use-raw-html
 ```
 
 ## Examples
@@ -77,6 +86,9 @@ python google-drive-to-mpc-fill.py --card-multiples "card1.png|3;card2.png|2;fro
 
 # Combined features
 python google-drive-to-mpc-fill.py --recursive --double-sided "front1.png|back1.png" --card-multiples "front1.png|2;back1.png|2" --output combined.xml "https://drive.google.com/drive/folders/1ABC123..."
+
+# Use raw HTML scraping (faster, but may miss files that require scrolling)
+python google-drive-to-mpc-fill.py --use-raw-html --output cards.xml "https://drive.google.com/drive/folders/1ABC123..."
 ```
 
 ## Combining Multiple XML Files
